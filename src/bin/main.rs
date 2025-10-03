@@ -1,62 +1,169 @@
 #![no_std]
 #![no_main]
-#![deny(
-    clippy::mem_forget,
-    reason = "mem::forget is generally not safe to do with esp_hal types, especially those \
-    holding buffers for the duration of a data transfer."
-)]
 
-use bt_hci::controller::ExternalController;
 use defmt::info;
 use embassy_executor::Spawner;
-use embassy_time::{Duration, Timer};
 use esp_hal::clock::CpuClock;
+use esp_hal::gpio::{Input, InputConfig, Pull};
+use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::timer::systimer::SystemTimer;
-use esp_hal::timer::timg::TimerGroup;
-use esp_wifi::ble::controller::BleConnector;
 use panic_rtt_target as _;
+use prop_relay_control::hardware::{DigitalInput, RelayOutput, RelayState};
+use prop_relay_control::input::{input_monitor_task, CooldownTracker, InputEventChannel};
+use prop_relay_control::relay::{RelayController, SequenceStep};
+use prop_relay_control::tca9554::{Tca9554, TCA9554_ADDRESS};
 
 extern crate alloc;
 
-// This creates a default app-descriptor required by the esp-idf bootloader.
-// For more information see: <https://docs.espressif.com/projects/esp-idf/en/stable/esp32/api-reference/system/app_image_format.html#application-description>
 esp_bootloader_esp_idf::esp_app_desc!();
+
+// Global input event channel
+static INPUT_CHANNEL: InputEventChannel = embassy_sync::channel::Channel::new();
+
+// Example sequence: Jump scare prop
+const JUMP_SCARE: &[SequenceStep] = &[
+    SequenceStep::new(RelayOutput::Relay1, RelayState::High, 500),
+    SequenceStep::new(RelayOutput::Relay1, RelayState::Low, 200),
+    SequenceStep::new(RelayOutput::Relay2, RelayState::High, 300),
+    SequenceStep::new(RelayOutput::Relay2, RelayState::Low, 0),
+];
 
 #[esp_hal_embassy::main]
 async fn main(spawner: Spawner) {
-    // generator version: 0.5.0
-
     rtt_target::rtt_init_defmt!();
 
     let config = esp_hal::Config::default().with_cpu_clock(CpuClock::max());
     let peripherals = esp_hal::init(config);
 
     esp_alloc::heap_allocator!(size: 64 * 1024);
-    // COEX needs more RAM - so we've added some more
-    esp_alloc::heap_allocator!(#[unsafe(link_section = ".dram2_uninit")] size: 64 * 1024);
 
     let timer0 = SystemTimer::new(peripherals.SYSTIMER);
     esp_hal_embassy::init(timer0.alarm0);
 
-    info!("Embassy initialized!");
+    info!("Prop Relay Controller starting...");
 
-    let rng = esp_hal::rng::Rng::new(peripherals.RNG);
-    let timer1 = TimerGroup::new(peripherals.TIMG0);
-    let wifi_init =
-        esp_wifi::init(timer1.timer0, rng).expect("Failed to initialize WIFI/BLE controller");
-    let (mut _wifi_controller, _interfaces) = esp_wifi::wifi::new(&wifi_init, peripherals.WIFI)
-        .expect("Failed to initialize WIFI controller");
-    // find more examples https://github.com/embassy-rs/trouble/tree/main/examples/esp32
-    let transport = BleConnector::new(&wifi_init, peripherals.BT);
-    let _ble_controller = ExternalController::<_, 20>::new(transport);
+    // Initialize I2C for TCA9554 relay expander (async mode)
+    let i2c = I2c::new(peripherals.I2C0, I2cConfig::default())
+        .expect("Failed to create I2C")
+        .with_sda(peripherals.GPIO42)
+        .with_scl(peripherals.GPIO41)
+        .into_async();
 
-    // TODO: Spawn some tasks
-    let _ = spawner;
+    let tca9554 = Tca9554::new(i2c, TCA9554_ADDRESS);
+    let relay_controller = RelayController::new(tca9554);
 
-    loop {
-        info!("Hello world!");
-        Timer::after(Duration::from_secs(1)).await;
+    if let Err(_) = relay_controller.init().await {
+        defmt::error!("Failed to initialize relay controller");
     }
 
-    // for inspiration have a look at the examples at https://github.com/esp-rs/esp-hal/tree/esp-hal-v1.0.0-rc.0/examples/src/bin
+    // Initialize digital input pins (GPIO4-11)
+    let input_cfg = InputConfig::default().with_pull(Pull::Down);
+    let di1 = Input::new(peripherals.GPIO4, input_cfg.clone());
+    let di2 = Input::new(peripherals.GPIO5, input_cfg.clone());
+    let di3 = Input::new(peripherals.GPIO6, input_cfg.clone());
+    let di4 = Input::new(peripherals.GPIO7, input_cfg.clone());
+    let di5 = Input::new(peripherals.GPIO8, input_cfg.clone());
+    let di6 = Input::new(peripherals.GPIO9, input_cfg.clone());
+    let di7 = Input::new(peripherals.GPIO10, input_cfg.clone());
+    let di8 = Input::new(peripherals.GPIO11, input_cfg.clone());
+
+    info!("Hardware initialized, starting tasks...");
+
+    // Spawn input monitor tasks for all 8 digital inputs
+    spawner.spawn(di1_monitor_task(di1)).ok();
+    spawner.spawn(di2_monitor_task(di2)).ok();
+    spawner.spawn(di3_monitor_task(di3)).ok();
+    spawner.spawn(di4_monitor_task(di4)).ok();
+    spawner.spawn(di5_monitor_task(di5)).ok();
+    spawner.spawn(di6_monitor_task(di6)).ok();
+    spawner.spawn(di7_monitor_task(di7)).ok();
+    spawner.spawn(di8_monitor_task(di8)).ok();
+
+    // Spawn main control task
+    spawner.spawn(control_task(relay_controller)).ok();
+
+    info!("System ready - 8 input monitors active");
+}
+
+// Input monitor tasks
+#[embassy_executor::task]
+async fn di1_monitor_task(pin: Input<'static>) {
+    input_monitor_task::<4>(pin, DigitalInput::DI1, 100, &INPUT_CHANNEL).await
+}
+
+#[embassy_executor::task]
+async fn di2_monitor_task(pin: Input<'static>) {
+    input_monitor_task::<5>(pin, DigitalInput::DI2, 100, &INPUT_CHANNEL).await
+}
+
+#[embassy_executor::task]
+async fn di3_monitor_task(pin: Input<'static>) {
+    input_monitor_task::<6>(pin, DigitalInput::DI3, 100, &INPUT_CHANNEL).await
+}
+
+#[embassy_executor::task]
+async fn di4_monitor_task(pin: Input<'static>) {
+    input_monitor_task::<7>(pin, DigitalInput::DI4, 100, &INPUT_CHANNEL).await
+}
+
+#[embassy_executor::task]
+async fn di5_monitor_task(pin: Input<'static>) {
+    input_monitor_task::<8>(pin, DigitalInput::DI5, 100, &INPUT_CHANNEL).await
+}
+
+#[embassy_executor::task]
+async fn di6_monitor_task(pin: Input<'static>) {
+    input_monitor_task::<9>(pin, DigitalInput::DI6, 100, &INPUT_CHANNEL).await
+}
+
+#[embassy_executor::task]
+async fn di7_monitor_task(pin: Input<'static>) {
+    input_monitor_task::<10>(pin, DigitalInput::DI7, 100, &INPUT_CHANNEL).await
+}
+
+#[embassy_executor::task]
+async fn di8_monitor_task(pin: Input<'static>) {
+    input_monitor_task::<11>(pin, DigitalInput::DI8, 100, &INPUT_CHANNEL).await
+}
+
+// Main control task
+#[embassy_executor::task]
+async fn control_task(relay_controller: RelayController<I2c<'static, esp_hal::Async>>) {
+    info!("Control task started");
+
+    // Create cooldown tracker (5 second cooldown)
+    let mut cooldown_tracker = CooldownTracker::new(5000);
+
+    loop {
+        // Wait for input events
+        let event = INPUT_CHANNEL.receive().await;
+        info!("Received input event: {:?} triggered", event.input);
+
+        // Check cooldown
+        if cooldown_tracker.is_cooling_down(event.input) {
+            let remaining = cooldown_tracker.remaining_ms(event.input);
+            info!(
+                "Input {:?} cooling down, ignoring ({}ms remaining)",
+                event.input, remaining
+            );
+            continue;
+        }
+
+        // For demo: DI1 triggers jump_scare sequence
+        if event.input == DigitalInput::DI1 {
+            info!("Executing jump_scare sequence");
+
+            // Mark triggered (start cooldown)
+            cooldown_tracker.mark_triggered(event.input);
+
+            // Execute sequence
+            if let Err(_) = relay_controller.execute_sequence(JUMP_SCARE).await {
+                defmt::error!("Failed to execute sequence");
+            }
+
+            info!("Sequence complete. Cooldown active for 5000ms");
+        } else {
+            info!("No sequence mapped to {:?}", event.input);
+        }
+    }
 }
