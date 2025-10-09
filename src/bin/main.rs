@@ -22,10 +22,8 @@ static INPUT_CHANNEL: InputEventChannel = embassy_sync::channel::Channel::new();
 
 // Example sequence: Jump scare prop
 const JUMP_SCARE: &[SequenceStep] = &[
-    SequenceStep::new(RelayOutput::Relay1, RelayState::High, 500),
-    SequenceStep::new(RelayOutput::Relay1, RelayState::Low, 200),
-    SequenceStep::new(RelayOutput::Relay2, RelayState::High, 300),
-    SequenceStep::new(RelayOutput::Relay2, RelayState::Low, 0),
+    SequenceStep::new(RelayOutput::Relay1, RelayState::High, 1000),
+    SequenceStep::new(RelayOutput::Relay1, RelayState::Low, 0),
 ];
 
 #[esp_hal_embassy::main]
@@ -57,7 +55,7 @@ async fn main(spawner: Spawner) {
     }
 
     // Initialize digital input pins (GPIO4-11)
-    let input_cfg = InputConfig::default().with_pull(Pull::Down);
+    let input_cfg = InputConfig::default().with_pull(Pull::Up);
     let di1 = Input::new(peripherals.GPIO4, input_cfg.clone());
     let di2 = Input::new(peripherals.GPIO5, input_cfg.clone());
     let di3 = Input::new(peripherals.GPIO6, input_cfg.clone());
