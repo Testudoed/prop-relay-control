@@ -51,7 +51,8 @@
   "runArgs": [
     "--privileged",
     "--device=/dev/ttyACM0",
-    "--group-add=dialout"
+    "--group-add=dialout",
+    "--group-add=plugdev"
   ],
   "workspaceMount": "source=${localWorkspaceFolder},target=/home/esp/prop-relay-control,type=bind,consistency=cached",
   "workspaceFolder": "/home/esp/prop-relay-control"

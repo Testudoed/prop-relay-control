@@ -14,7 +14,7 @@ ARG GITHUB_TOKEN
 # Install dependencies
 RUN apt-get update \
     && apt-get install -y git curl llvm-dev libclang-dev clang unzip \
-    libusb-1.0-0 libssl-dev libudev-dev pkg-config \
+    libusb-1.0-0 libssl-dev libudev-dev pkg-config cmake \
     && apt-get clean -y && rm -rf /var/lib/apt/lists/* /tmp/library-scripts
 
 # Set users
@@ -24,7 +24,7 @@ WORKDIR /home/${CONTAINER_USER}
 
 # Install rustup
 RUN curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- \
-    --default-toolchain none -y --profile minimal
+    --default-toolchain stable -y --profile minimal
 
 # Update envs
 ENV PATH=${PATH}:/home/${CONTAINER_USER}/.cargo/bin
@@ -55,5 +55,8 @@ RUN if [ -n "${GITHUB_TOKEN}" ]; then export GITHUB_TOKEN=${GITHUB_TOKEN}; fi  \
 
 # Activate ESP environment
 RUN echo "source /home/${CONTAINER_USER}/export-esp.sh" >> ~/.bashrc
+
+# Install probe-rs
+RUN cargo install probe-rs-tools --locked
 
 CMD [ "/bin/bash" ]
