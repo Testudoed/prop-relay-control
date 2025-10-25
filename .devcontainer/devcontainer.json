@@ -39,7 +39,8 @@
       "extensions": [
         "rust-lang.rust-analyzer",
         "tamasfe.even-better-toml",
-        "fill-labs.dependi"
+        "fill-labs.dependi",
+        "probe-rs.probe-rs-debugger"
       ]
     }
   },
