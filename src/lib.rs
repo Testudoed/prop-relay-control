@@ -4,3 +4,5 @@ pub mod hardware;
 pub mod input;
 pub mod relay;
 pub mod tca9554;
+
+pub mod sequence;
