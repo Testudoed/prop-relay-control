@@ -4,25 +4,8 @@ use embassy_time::{Duration, Timer};
 use embedded_hal_async::i2c::I2c;
 
 use crate::hardware::{RelayOutput, RelayState};
+use crate::sequence::SequenceStep;
 use crate::tca9554::Tca9554;
-
-/// Single step in a relay sequence
-#[derive(Debug, Clone, Copy)]
-pub struct SequenceStep {
-    pub relay: RelayOutput,
-    pub state: RelayState,
-    pub duration_ms: u32,
-}
-
-impl SequenceStep {
-    pub const fn new(relay: RelayOutput, state: RelayState, duration_ms: u32) -> Self {
-        Self {
-            relay,
-            state,
-            duration_ms,
-        }
-    }
-}
 
 /// Relay controller managing 8 relay outputs via I2C
 pub struct RelayController<I2C> {

@@ -8,9 +8,12 @@ use esp_hal::gpio::{Input, InputConfig, Pull};
 use esp_hal::i2c::master::{Config as I2cConfig, I2c};
 use esp_hal::timer::systimer::SystemTimer;
 use panic_rtt_target as _;
-use prop_relay_control::hardware::{DigitalInput, RelayOutput, RelayState};
-use prop_relay_control::input::{input_monitor_task, CooldownTracker, InputEventChannel};
-use prop_relay_control::relay::{RelayController, SequenceStep};
+use prop_relay_control::hardware::DigitalInput;
+use prop_relay_control::input::{input_monitor_task, InputEventChannel};
+use prop_relay_control::relay::RelayController;
+use prop_relay_control::sequence::{
+    SequenceConfig, SequenceDispatcher, JUMP_SCARE, SNAKE_SEQUENCE,
+};
 use prop_relay_control::tca9554::{Tca9554, TCA9554_ADDRESS};
 
 extern crate alloc;
@@ -20,10 +23,30 @@ esp_bootloader_esp_idf::esp_app_desc!();
 // Global input event channel
 static INPUT_CHANNEL: InputEventChannel = embassy_sync::channel::Channel::new();
 
-// Example sequence: Jump scare prop
-const JUMP_SCARE: &[SequenceStep] = &[
-    SequenceStep::new(RelayOutput::Relay1, RelayState::High, 1000),
-    SequenceStep::new(RelayOutput::Relay1, RelayState::Low, 0),
+/// Sequence configuration registry
+///
+/// To add a new sequence:
+/// 1. Define the sequence steps in src/sequence.rs (or use an existing one)
+/// 2. Add a new SequenceConfig entry here with:
+///    - Trigger input (which DI# activates it)
+///    - Cooldown duration in milliseconds
+///    - Reference to the sequence steps
+///    - Name for logging
+///
+/// Example:
+/// ```
+/// const MY_SEQUENCE: &[SequenceStep] = &[
+///     SequenceStep::new(RelayOutput::Relay3, RelayState::High, 2000),
+///     SequenceStep::new(RelayOutput::Relay3, RelayState::Low, 0),
+/// ];
+///
+/// // Then add to SEQUENCE_CONFIGS:
+/// SequenceConfig::new(DigitalInput::DI3, 4000, MY_SEQUENCE, "My Effect"),
+/// ```
+const SEQUENCE_CONFIGS: &[SequenceConfig] = &[
+    SequenceConfig::new(DigitalInput::DI1, 5000, JUMP_SCARE, "Jump Scare"),
+    SequenceConfig::new(DigitalInput::DI2, 30000, SNAKE_SEQUENCE, "Snake Attack"),
+    // Add more sequence mappings here...
 ];
 
 #[esp_hal_embassy::main]
@@ -128,18 +151,22 @@ async fn di8_monitor_task(pin: Input<'static>) {
 #[embassy_executor::task]
 async fn control_task(relay_controller: RelayController<I2c<'static, esp_hal::Async>>) {
     info!("Control task started");
+    info!(
+        "Loaded {} sequence configuration(s)",
+        SEQUENCE_CONFIGS.len()
+    );
 
-    // Create cooldown tracker (5 second cooldown)
-    let mut cooldown_tracker = CooldownTracker::new(5000);
+    // Create sequence dispatcher with our configurations
+    let mut dispatcher = SequenceDispatcher::new(SEQUENCE_CONFIGS);
 
     loop {
         // Wait for input events
         let event = INPUT_CHANNEL.receive().await;
         info!("Received input event: {:?} triggered", event.input);
 
-        // Check cooldown
-        if cooldown_tracker.is_cooling_down(event.input) {
-            let remaining = cooldown_tracker.remaining_ms(event.input);
+        // Check if this input is in cooldown
+        if dispatcher.is_cooling_down(event.input) {
+            let remaining = dispatcher.remaining_ms(event.input);
             info!(
                 "Input {:?} cooling down, ignoring ({}ms remaining)",
                 event.input, remaining
@@ -147,19 +174,22 @@ async fn control_task(relay_controller: RelayController<I2c<'static, esp_hal::As
             continue;
         }
 
-        // For demo: DI1 triggers jump_scare sequence
-        if event.input == DigitalInput::DI1 {
-            info!("Executing jump_scare sequence");
+        // Find matching sequence configuration
+        if let Some(config) = dispatcher.find_config(SEQUENCE_CONFIGS, event.input) {
+            info!("Executing sequence: {}", config.name);
 
             // Mark triggered (start cooldown)
-            cooldown_tracker.mark_triggered(event.input);
+            dispatcher.mark_triggered(event.input);
 
             // Execute sequence
-            if let Err(_) = relay_controller.execute_sequence(JUMP_SCARE).await {
-                defmt::error!("Failed to execute sequence");
+            if let Err(_) = relay_controller.execute_sequence(config.sequence).await {
+                defmt::error!("Failed to execute sequence: {}", config.name);
             }
 
-            info!("Sequence complete. Cooldown active for 5000ms");
+            info!(
+                "Sequence '{}' complete. Cooldown active for {}ms",
+                config.name, config.cooldown_ms
+            );
         } else {
             info!("No sequence mapped to {:?}", event.input);
         }
